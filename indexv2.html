@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Neon Air Hockey - Multi-Device Support</title>
+    <style>
+        /* --- Dark Mode & Mobile Optimization --- */
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #0a0a0a;
+            color: #e0e0e0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden; /* ป้องกันการ Scroll ทั้งหน้าจอ */
+            touch-action: none; /* หยุด Browser behavior ทั้งหมดบน Body */
+        }
+
+        #game-container {
+            position: relative;
+            box-shadow: 0 0 30px rgba(0, 195, 255, 0.2);
+            border-radius: 12px;
+            overflow: hidden;
+            max-width: 95vw;
+            max-height: 85vh;
+            aspect-ratio: 450 / 700;
+        }
+
+        canvas {
+            display: block;
+            background: #121212;
+            cursor: crosshair;
+            touch-action: none; /* สำคัญมาก: ป้องกันการเลื่อนหน้าจอขณะลากนิ้วบน Canvas */
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            width: 100%;
+            display: flex;
+            justify-content: space-around;
+            font-size: clamp(20px, 5vw, 32px);
+            font-weight: bold;
+            text-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
+            pointer-events: none;
+            user-select: none;
+        }
+
+        .score-ai { color: #ff4d4d; text-shadow: 0 0 15px #ff4d4d; }
+        .score-player { color: #00c3ff; text-shadow: 0 0 15px #00c3ff; }
+
+        #overlay {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            display: none;
+            z-index: 10;
+        }
+
+        #overlay h1 {
+            font-size: clamp(32px, 8vw, 48px);
+            margin-bottom: 20px;
+            text-shadow: 0 0 20px #ffffff;
+        }
+        
+        #overlay p { font-size: 18px; color: #aaa; }
+
+        .instruction {
+            position: absolute;
+            bottom: 10px;
+            font-size: 12px;
+            color: #444;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <div id="ui-layer">
+            <div class="score-ai">AI: <span id="aiScore">0</span></div>
+            <div class="score-player">YOU: <span id="playerScore">0</span></div>
+        </div>
+        <canvas id="gameCanvas" width="450" height="700"></canvas>
+
+        <div id="overlay">
+            <h1 id="winnerText">YOU WIN!</h1>
+            <p>Tap to restart</p>
+        </div>
+    </div>
+    <div class="instruction">Desktop: Mouse | Mobile: Touch & Slide</div>
+
+<script>
+// ==========================================
+//  UPGRADED MULTI-DEVICE PHYSICS ENGINE
+// ==========================================
+
+const CONSTANTS = {
+    WIN_SCORE: 3,
+    FRICTION: 0.988, 
+    WALL_BOUNCE: 0.8, 
+    MAX_SPEED: 20,
+    AI_SPEED_FACTOR: 0.12, 
+    COLORS: {
+        BG: '#121212',
+        PLAYER: '#00c3ff',
+        AI: '#ff4d4d',
+        PUCK: '#ffffff',
+        LINES: '#333333'
+    }
+};
+
+class Vector {
+    constructor(x, y) { this.x = x; this.y = y; }
+    add(v) { return new Vector(this.x + v.x, this.y + v.y); }
+    sub(v) { return new Vector(this.x - v.x, this.y - v.y); }
+    mult(n) { return new Vector(this.x * n, this.y * n); }
+    mag() { return Math.sqrt(this.x * this.x + this.y * this.y); }
+    normalize() {
+        let m = this.mag();
+        return m > 0 ? this.mult(1 / m) : new Vector(0, 0);
+    }
+    static dist(v1, v2) { return v1.sub(v2).mag(); }
+}
+
+class Puck {
+    constructor(cw, ch) {
+        this.radius = 18;
+        this.cw = cw;
+        this.ch = ch;
+        this.reset();
+        this.flashIntensity = 0;
+    }
+
+    reset() {
+        this.pos = new Vector(this.cw / 2, this.ch / 2);
+        this.vel = new Vector(0, 0);
+    }
+
+    update() {
+        this.pos = this.pos.add(this.vel);
+        this.vel = this.vel.mult(CONSTANTS.FRICTION);
+
+        if (this.vel.mag() > CONSTANTS.MAX_SPEED) {
+            this.vel = this.vel.normalize().mult(CONSTANTS.MAX_SPEED);
+        }
+        if(this.flashIntensity > 0) this.flashIntensity -= 0.08;
+    }
+
+    checkBounds() {
+        let hit = false;
+        // Side walls
+        if (this.pos.x - this.radius < 0) {
+            this.pos.x = this.radius; this.vel.x *= -CONSTANTS.WALL_BOUNCE; hit = true;
+        } else if (this.pos.x + this.radius > this.cw) {
+            this.pos.x = this.cw - this.radius; this.vel.x *= -CONSTANTS.WALL_BOUNCE; hit = true;
+        }
+
+        // Top/Bottom walls bounce (outside goal area)
+        const isGoalWidth = this.pos.x > this.cw * 0.3 && this.pos.x < this.cw * 0.7;
+        if (!isGoalWidth) {
+            if (this.pos.y - this.radius < 0) {
+                this.pos.y = this.radius; this.vel.y *= -CONSTANTS.WALL_BOUNCE; hit = true;
+            } else if (this.pos.y + this.radius > this.ch) {
+                this.pos.y = this.ch - this.radius; this.vel.y *= -CONSTANTS.WALL_BOUNCE; hit = true;
+            }
+        }
+        if(hit) this.flashIntensity = 1.0;
+    }
+}
+
+class Mallet {
+    constructor(x, y, isAI) {
+        this.pos = new Vector(x, y);
+        this.radius = 35;
+        this.isAI = isAI;
+    }
+
+    update(targetPos, puckPos, cw, ch) {
+        if (this.isAI) {
+            let destX = puckPos.x;
+            let destY = puckPos.y < ch / 2 ? puckPos.y : ch / 4;
+            this.pos.x += (destX - this.pos.x) * CONSTANTS.AI_SPEED_FACTOR;
+            this.pos.y += (destY - this.pos.y) * CONSTANTS.AI_SPEED_FACTOR;
+        } else {
+            this.pos = targetPos;
+        }
+        this.constrain(cw, ch);
+    }
+
+    constrain(cw, ch) {
+        this.pos.x = Math.max(this.radius, Math.min(cw - this.radius, this.pos.x));
+        if (this.isAI) {
+            this.pos.y = Math.max(this.radius, Math.min(ch / 2 - this.radius, this.pos.y));
+        } else {
+            this.pos.y = Math.max(ch / 2 + this.radius, Math.min(ch - this.radius, this.pos.y));
+        }
+    }
+}
+
+class Game {
+    constructor() {
+        this.canvas = document.getElementById('gameCanvas');
+        this.ctx = this.canvas.getContext('2d');
+        this.cw = this.canvas.width;
+        this.ch = this.canvas.height;
+
+        this.puck = new Puck(this.cw, this.ch);
+        this.aiMallet = new Mallet(this.cw / 2, 100, true);
+        this.playerMallet = new Mallet(this.cw / 2, this.ch - 100, false);
+
+        this.score = { player: 0, ai: 0 };
+        this.gameState = 'playing';
+        this.inputPos = new Vector(this.cw / 2, this.ch - 100);
+
+        this.setupUnifiedInput();
+        this.loop();
+    }
+
+    // --- แก้ไขจุดนี้: ใช้ Pointer Events เพื่อรองรับทั้ง Mouse และ Touch ---
+    setupUnifiedInput() {
+        const handlePointer = (e) => {
+            const rect = this.canvas.getBoundingClientRect();
+            // คำนวณ Scale เพื่อรองรับหน้าจอมือถือที่ Canvas ถูกย่อขยาย
+            const scaleX = this.cw / rect.width;
+            const scaleY = this.ch / rect.height;
+            
+            this.inputPos.x = (e.clientX - rect.left) * scaleX;
+            this.inputPos.y = (e.clientY - rect.top) * scaleY;
+        };
+
+        // PointerMove ครอบคลุมทั้ง MouseMove และ TouchMove
+        window.addEventListener('pointermove', handlePointer, { passive: false });
+        window.addEventListener('pointerdown', handlePointer, { passive: false });
+
+        document.getElementById('overlay').addEventListener('pointerdown', () => {
+            if(this.gameState === 'gameOver') this.resetGame();
+        });
+    }
+
+    handleCollisions() {
+        [this.playerMallet, this.aiMallet].forEach(mallet => {
+            let dist = Vector.dist(this.puck.pos, mallet.pos);
+            if (dist < this.puck.radius + mallet.radius) {
+                this.puck.flashIntensity = 1.0;
+                let overlap = (this.puck.radius + mallet.radius) - dist;
+                let dir = this.puck.pos.sub(mallet.pos).normalize();
+                this.puck.pos = this.puck.pos.add(dir.mult(overlap));
+                this.puck.vel = dir.mult(1.2 * Math.max(8, this.puck.vel.mag())); 
+            }
+        });
+    }
+
+    checkGoal() {
+        if (this.puck.pos.y < -this.puck.radius) this.scoreGoal('player');
+        else if (this.puck.pos.y > this.ch + this.puck.radius) this.scoreGoal('ai');
+    }
+
+    scoreGoal(winner) {
+        this.score[winner]++;
+        document.getElementById('aiScore').textContent = this.score.ai;
+        document.getElementById('playerScore').textContent = this.score.player;
+        this.gameState = 'goalReset';
+        
+        if (this.score[winner] >= CONSTANTS.WIN_SCORE) {
+            this.gameState = 'gameOver';
+            document.getElementById('winnerText').textContent = winner === 'player' ? "YOU WIN!" : "AI WINS!";
+            document.getElementById('overlay').style.display = 'flex';
+        } else {
+            setTimeout(() => { this.puck.reset(); this.gameState = 'playing'; }, 1000);
+        }
+    }
+
+    resetGame() {
+        this.score = { player: 0, ai: 0 };
+        document.getElementById('aiScore').textContent = "0";
+        document.getElementById('playerScore').textContent = "0";
+        this.puck.reset();
+        document.getElementById('overlay').style.display = 'none';
+        this.gameState = 'playing';
+    }
+
+    draw() {
+        this.ctx.fillStyle = CONSTANTS.COLORS.BG;
+        this.ctx.fillRect(0, 0, this.cw, this.ch);
+
+        // Center Line & Circle
+        this.ctx.strokeStyle = CONSTANTS.COLORS.LINES;
+        this.ctx.lineWidth = 2;
+        this.ctx.beginPath();
+        this.ctx.moveTo(0, this.ch/2); this.ctx.lineTo(this.cw, this.ch/2);
+        this.ctx.stroke();
+        this.ctx.beginPath();
+        this.ctx.arc(this.cw/2, this.ch/2, 60, 0, Math.PI*2);
+        this.ctx.stroke();
+
+        // Goals
+        this.ctx.strokeStyle = '#444';
+        this.ctx.strokeRect(this.cw*0.3, -10, this.cw*0.4, 20);
+        this.ctx.strokeRect(this.cw*0.3, this.ch-10, this.cw*0.4, 20);
+
+        const drawEnt = (obj, color, glow) => {
+            this.ctx.beginPath();
+            this.ctx.arc(obj.pos.x, obj.pos.y, obj.radius, 0, Math.PI*2);
+            this.ctx.fillStyle = color;
+            if(glow) { this.ctx.shadowBlur = 15; this.ctx.shadowColor = color; }
+            this.ctx.fill();
+            this.ctx.shadowBlur = 0;
+        };
+
+        drawEnt(this.aiMallet, CONSTANTS.COLORS.AI, true);
+        drawEnt(this.playerMallet, CONSTANTS.COLORS.PLAYER, true);
+        
+        let pColor = `rgba(255,255,255,${0.8 + this.puck.flashIntensity*0.2})`;
+        this.ctx.shadowBlur = 20 * this.puck.flashIntensity;
+        this.ctx.shadowColor = 'white';
+        drawEnt(this.puck, pColor, false);
+        this.ctx.shadowBlur = 0;
+    }
+
+    loop() {
+        if (this.gameState === 'playing') {
+            this.playerMallet.update(this.inputPos, this.puck.pos, this.cw, this.ch);
+            this.aiMallet.update(null, this.puck.pos, this.cw, this.ch);
+            this.puck.update();
+            this.puck.checkBounds();
+            this.handleCollisions();
+            this.checkGoal();
+        }
+        this.draw();
+        requestAnimationFrame(() => this.loop());
+    }
+}
+
+window.onload = () => new Game();
+</script>
+</body>
+</html>
